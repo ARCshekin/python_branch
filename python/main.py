@@ -1,6 +1,5 @@
 import logging
 import sys
-from this import d
 from typing import List, Any, Optional
 import requests
 from bs4 import BeautifulSoup
@@ -49,14 +48,14 @@ def ask_ai(prompt: str) -> str:
     logger.debug("🤖 Sending prompt to AI")
     try:
         messages = [
-            {"role": "system", "content": "Ты - большая языковая модель. Отвечай на вопросы пользователя."},
+            {"role": "system", "content": "You are an LLM that is used for testing web pages (unit tests and integration tests)"},
             {"role": "user", "content": prompt}
         ]
         completion = client.chat.completions.create(
             model='deepseek/deepseek-r1-alt-0528',
             messages=messages,
             temperature=0.1,
-            extra_headers={ "X-Title": "Colab Base Example" },
+            extra_headers={ "X-Title": "Innotester" },
         )
         response = completion.choices[0].message.content
         if response is None:
@@ -188,8 +187,8 @@ class WebTestRunner:
                     pass
                 raise ValueError("Failed to parse JSON from LLM response")
 
-            self.logger.info(f"🧪 Starting integration test: {test}")
-            self.logger.info(f"📋 Test parameters: {kwargs}")
+            self.logger.info(f"\U0001F9EA Starting integration test: {test}")
+            self.logger.info(f"\U0001F4CB Test parameters: {kwargs}")
             history = []
             
             with sync_playwright() as p:
@@ -197,7 +196,7 @@ class WebTestRunner:
                 context = browser.new_context()
                 page = context.new_page()
                 try:
-                    self.logger.info(f"🌐 Navigating to: {self.current_url}")
+                    self.logger.info(f"\U0001F310 Navigating to: {self.current_url}")
                     page.goto(self.current_url, timeout=60000)
                     page.wait_for_load_state('networkidle', timeout=60000)
                     self.logger.info("✅ Page loaded successfully")
@@ -211,13 +210,34 @@ class WebTestRunner:
                         for link_tag in soup.find_all('link', attrs={'as': 'script'}):
                             link_tag.decompose()
                         for link_tag in soup.find_all('link', href=True):
-                            if '.css' in link_tag['href']:
+                            if '.css' in link_tag.get('href', ''):
                                 link_tag.decompose()
                         cleaned_html = str(soup)
                         while '\n\n' in cleaned_html:
                             cleaned_html = cleaned_html.replace('\n\n', '\n')
 
-                        prompt = f"""
+                        # Remove all <jdiv> containers
+                        for jdiv_tag in soup.find_all('jdiv'):
+                            jdiv_tag.decompose()
+                        # Remove all attributes from <div> tags, including 'class' and 'style'
+                        for div_tag in soup.find_all('div'):
+                            if hasattr(div_tag, 'attrs'):
+                                div_tag.attrs.pop('class', None)
+                                div_tag.attrs.pop('style', None)
+                                div_tag.attrs.clear()
+                        # Remove all attributes from <span> tags, including 'class' and 'style'
+                        for span_tag in soup.find_all('span'):
+                            if hasattr(span_tag, 'attrs'):
+                                span_tag.attrs.pop('class', None)
+                                span_tag.attrs.pop('style', None)
+                                span_tag.attrs.clear()
+                        # Remove 'class' attribute from all h1-h4 tags
+                        for tag_name in ['h1', 'h2', 'h3', 'h4']:
+                            for tag in soup.find_all(tag_name):
+                                if getattr(tag, 'attrs', None) and 'class' in tag.attrs:
+                                    tag.attrs.pop('class', None)
+
+                        prompt = f'''
                             You are simulating an integration test for the following scenario:
 
                             Test: "{test}"
@@ -234,27 +254,27 @@ class WebTestRunner:
 
                             History of actions taken: {history}
 
-                            Your task is to execute the next logical step.
+                            Your task is to execute the next logical step(s).
+                            - You MAY perform several actions in one step, for example: fill several fields, then click a button.
+                            - If you need to fill multiple text fields and then click a button, you can do it in one response.
                             - DO NOT repeat any actions from history.
                             - Think: which step are we on in the scenario?
-                            - Think: do I need to permorm something on this page or I need to go to other page?
-                            - Think: if it is impossible to perform some action on this page, can you transfer to other page, where needed action can be performed?
+                            - Think: do I need to perform something on this page or go to another page?
+                            - If it is impossible to perform some action on this page, can you transfer to another page, where needed action can be performed?
                             - If test is complete or failed, STOP and return result.
                             - If action cannot be performed, STOP with failure and reason.
                             - REMEMBER: you can only perform actions on the current page (actions from example can be unusable for this page).
                             - **IMPORTANT:** Always make sure that all parentheses and quotes in your action strings are properly closed. For example, fill('input[name="username"]', 'arcenty') must have both parentheses and both single/double quotes closed. Do not return incomplete actions.
 
                             Respond ONLY with JSON inside <json> tags, like:
-                            <json>{{"action": "fill('#login', 'admin')"}}</json>
+                            <json>{{{{"actions": ["fill('#login', 'admin')", "fill('#password', '1234')", "click('#submit')"]}}}}</json>
                             OR
-                            <json>{{"status": "success", "message": "Login successful"}}</json>
+                            <json>{{{{"status": "success", "message": "Login successful"}}}}</json>
                             OR
-                            <json>{{"status": "fail", "message": "Password field not found"}}</json>
-                        """
-                        # with open(f'prompt.txt', 'w') as f:
-                        #     f.write(prompt)
+                            <json>{{{{"status": "fail", "message": "Password field not found"}}}}</json>
+                        '''
                         try:
-                            self.logger.debug("🤖 Sending prompt to LLM...")
+                            self.logger.info("🤖 Sending prompt to LLM...")
                             llm_response = ask_ai(prompt)
                             self.logger.debug(f"🤖 LLM response: {llm_response}")
                             parsed = parse_llm_json(llm_response)
@@ -275,62 +295,101 @@ class WebTestRunner:
                             self.logger.error(f"❌ Test failed: {message}")
                             browser.close()
                             return False, message
-                        action = parsed.get("action")
-                        if not action:
-                            self.logger.error("❌ No valid action received from LLM")
-                            browser.close()
-                            return False, "No valid action from LLM"
-                        history.append(action)
-                        self.logger.info(f"⚡ Executing action: {action}")
-
-                        try:
-                            if action.startswith("click("):
-                                selector = action[len("click("): -1].strip("'\"")
-                                self.logger.info(f"🖱️ Clicking element: {selector}")
-                                page.click(selector, timeout=10000)
-                                self.logger.info("✅ Click successful")
-                            elif action.startswith("fill("):
-                                inside = action[len("fill("):-1]
-                                if "," not in inside:
-                                    self.logger.error(f"❌ Malformed fill action: {action}")
-                                    browser.close()
-                                    return False, f"Malformed fill action: {action}"
-                                sel, val = inside.split(",", 1)
-                                sel = sel.strip("'\" ")
-                                val = val.strip("'\" ")
-                                self.logger.info(f"✏️ Filling element {sel} with value: {val}")
-                                page.fill(sel, val, timeout=10000)
-                                self.logger.info("✅ Fill successful")
-                            elif action.startswith("wait("):
-                                seconds = float(action[len("wait("): -1])
-                                self.logger.info(f"⏳ Waiting for {seconds} seconds")
-                                time.sleep(seconds)
-                                self.logger.info("✅ Wait completed")
-                            elif action == "reload()":
-                                self.logger.info("🔄 Reloading page")
-                                page.reload(timeout=10000)
-                                self.logger.info("✅ Page reloaded")
-                            else:
-                                self.logger.error(f"❌ Unknown action: {action}")
+                        actions = parsed.get("actions")
+                        # Универсальная обработка actions
+                        if actions is None:
+                            # fallback for single action (старый формат)
+                            action = parsed.get("action")
+                            if not action:
+                                self.logger.error("❌ No valid action(s) received from LLM")
                                 browser.close()
-                                return False, f"Unknown action: {action}"
-
-                            time.sleep(2)
-                            self.logger.debug(f"📝 Action completed. History: {history}")
-
-                        except PlaywrightTimeoutError as e:
-                            self.logger.error(f"⏰ Action timeout: {action}, error: {e}")
-                            browser.close()
-                            return False, f"Action timeout: {action}, error: {e}"
-                        except Exception as e:
-                            self.logger.error(f"❌ Action failed: {action}, error: {e}")
-                            browser.close()
-                            return False, f"Action failed: {action}, error: {e}"
+                                return False, "No valid action(s) from LLM"
+                            actions = [action]
+                        elif isinstance(actions, str):
+                            actions = [actions]
+                        elif isinstance(actions, dict):
+                            # Возможно, это статус
+                            if actions.get("status") == "success":
+                                message = actions.get("message", "Success")
+                                self.logger.info(f"✅ Test completed successfully: {message}")
+                                browser.close()
+                                return True, message
+                            if actions.get("status") == "fail":
+                                message = actions.get("message", "Failure")
+                                self.logger.error(f"❌ Test failed: {message}")
+                                browser.close()
+                                return False, message
+                            # Если не статус — обернём в список на всякий случай
+                            actions = [actions]
+                        elif not isinstance(actions, list):
+                            # Любой другой тип — обернём в список
+                            actions = [actions]
+                        self.logger.info(f"⚡ Executing actions: {actions!r}")
+                        for action in actions:
+                            # Check if action is статус-словарь (LLM может вернуть статус внутри списка)
+                            if isinstance(action, dict):
+                                if action.get("status") == "success":
+                                    message = action.get("message", "Success")
+                                    self.logger.info(f"✅ Test completed successfully: {message}")
+                                    browser.close()
+                                    return True, message
+                                if action.get("status") == "fail":
+                                    message = action.get("message", "Failure")
+                                    self.logger.error(f"❌ Test failed: {message}")
+                                    browser.close()
+                                    return False, message
+                                continue
+                            history.append(action)
+                            try:
+                                if action.startswith("click("):
+                                    selector = action[len("click("):-1].strip("'\"")
+                                    self.logger.info(f"🖱️ Clicking element: {selector}")
+                                    page.click(selector, timeout=10000)
+                                    self.logger.info("✅ Click successful")
+                                elif action.startswith("fill("):
+                                    inside = action[len("fill("):-1]
+                                    if "," not in inside:
+                                        self.logger.error(f"❌ Malformed fill action: {action}")
+                                        browser.close()
+                                        return False, f"Malformed fill action: {action}"
+                                    sel, val = inside.split(",", 1)
+                                    sel = sel.strip("'\" ")
+                                    val = val.strip("'\" ")
+                                    self.logger.info(f"✏️ Filling element {sel} with value: {val}")
+                                    page.fill(sel, val, timeout=10000)
+                                    self.logger.info("✅ Fill successful")
+                                elif action.startswith("wait("):
+                                    seconds = float(action[len("wait("):-1])
+                                    self.logger.info(f"⏳ Waiting for {seconds} seconds")
+                                    time.sleep(seconds)
+                                    self.logger.info("✅ Wait completed")
+                                elif action == "reload()":
+                                    self.logger.info("🔄 Reloading page")
+                                    page.reload(timeout=10000)
+                                    self.logger.info("✅ Page reloaded")
+                                else:
+                                    self.logger.error(f"❌ Unknown action: {action}")
+                                    browser.close()
+                                    return False, f"Unknown action: {action}"
+                                time.sleep(1)
+                                self.logger.debug(f"📝 Action completed. History: {history}")
+                            except PlaywrightTimeoutError as e:
+                                self.logger.error(f"⏰ Action timeout: {action}, error: {e}")
+                                browser.close()
+                                return False, f"Action timeout: {action}, error: {e}"
+                            except Exception as e:
+                                self.logger.error(f"❌ Action failed: {action}, error: {e}")
+                                browser.close()
+                                return False, f"Action failed: {action}, error: {e}"
+                        # После выполнения всех действий — если среди них был статус, мы уже завершили тест выше
+                        # иначе — продолжаем цикл
+                        time.sleep(2)
                 finally:
                     browser.close()
                     self.logger.info("🔒 Browser closed")
             return False, "Error while testing"
         except Exception as e:
+            # raise e
             self.logger.error(f"❌ Error while testing integration: {e}")
             return False, "Error while testing"
 
@@ -351,10 +410,7 @@ def run_tests(data: InputData):
         else:
             integration_tests.append(test)
     try:
-        result = []
-        a = runner.check_page(data.url, unit_tests)
-        for b in a:
-            result.append({'test': test, 'result': b, 'comment': 'PASS' if b else 'FAIL'})
+        result = runner.check_page(data.url, unit_tests)
         for integration_test in integration_tests:
             flag, comment = runner.integration_test(integration_test)
             result.append({'test': integration_test, 'result': flag, 'comment': comment})
